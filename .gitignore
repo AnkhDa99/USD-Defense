@@ -23,17 +23,24 @@ wheels/
 .installed.cfg
 *.egg
 
-data/
-src/data/
-src/save/
-src/saved_models/
-src/logs/
-src/outputs/
-src/temp/
+data/*
+src/data/*
+src/save/*
+src/saved_models/*
+src/logs/*
+src/outputs/*
+src/temp/*
 src/tmp*/
-src/home/
-assets/
-image/
+src/home/*
+assets/*
+!data/.gitkeep
+!src/data/.gitkeep
+!src/save/.gitkeep
+!src/saved_models/.gitkeep
+!src/logs/.gitkeep
+!src/outputs/.gitkeep
+!src/temp/.gitkeep
+!assets/.gitkeep
 
 *.pt
 *.pth
@@ -42,9 +49,6 @@ image/
 *.tar.gz
 *.log
 *.th
-*.npz
-*.npy
-*.png
 
 Smoothness Analysis/dataset/
 
