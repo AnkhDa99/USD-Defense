@@ -1,0 +1,361 @@
+import os
+import numpy as np
+from copy import deepcopy
+from torchvision.datasets import CIFAR10
+from torch.utils.data import Dataset
+from PIL import Image
+import torch 
+
+## Split CIFAR10 Dataset
+def split_dataset(dataset, val_frac=0.1, perm=None):
+    """
+    :param dataset: The whole dataset which will be split.
+    :param val_frac: the fraction of validation set.
+    :param perm: A predefined permutation for sampling. If perm is None, generate one.
+    :return: A training set + a validation set
+    """
+    if perm is None:
+        perm = np.arange(len(dataset))
+        np.random.shuffle(perm)
+    nb_val = int(val_frac * len(dataset))
+
+    # generate the training set
+    train_set = deepcopy(dataset)
+    train_set.data = train_set.data[perm[nb_val:]]
+    train_set.targets = np.array(train_set.targets)[perm[nb_val:]].tolist()
+
+    # generate the test set
+    val_set = deepcopy(dataset)
+    val_set.data = val_set.data[perm[:nb_val]]
+    val_set.targets = np.array(val_set.targets)[perm[:nb_val]].tolist()
+    return train_set, val_set
+
+## Split GTSRB Dataset 
+def split_dataset_gtsrb(dataset, val_frac=0.1, perm=None):
+    """
+    :param dataset: The whole dataset which will be split.
+    :param val_frac: the fraction of validation set.
+    :param perm: A predefined permutation for sampling. If perm is None, generate one.
+    :return: A training set + a validation set
+    """
+    if perm is None:
+        perm = np.arange(len(dataset))
+        np.random.shuffle(perm)
+    nb_val = int(val_frac * len(dataset))
+
+    # generate the training set
+    train_set = deepcopy(dataset)
+    # print(train_set.images)
+    train_set.images = np.array(train_set.images)[perm[nb_val:]]
+    train_set.labels = np.array(train_set.labels)[perm[nb_val:]].tolist()
+
+    # generate the test set
+    val_set = deepcopy(dataset)
+    val_set.images = np.array(val_set.images)[perm[:nb_val]]
+    val_set.labels = np.array(val_set.labels)[perm[:nb_val]].tolist()
+    return train_set, val_set
+
+
+def generate_trigger(trigger_type):
+    if trigger_type == 'checkerboard_1corner':  # checkerboard at the right bottom corner
+        pattern = np.zeros(shape=(32, 32, 1), dtype=np.uint8) + 122
+        mask = np.zeros(shape=(32, 32, 1), dtype=np.uint8)
+        trigger_value = [[0, 0, 255], [0, 255, 0], [255, 0, 255]]
+        trigger_region = [-1, 0, 1]
+        for h in trigger_region:
+            for w in trigger_region:
+                pattern[30 + h, 30 + w, 0] = trigger_value[h+1][w+1]
+                mask[30 + h, 30 + w, 0] = 1
+    elif trigger_type == 'fourCornerTrigger':
+        print("Generating 'fourCornerTrigger'...") # 添加打印以确认
+        pattern = np.zeros(shape=(32, 32, 3), dtype=np.uint8)
+        mask = np.zeros(shape=(32, 32, 3), dtype=np.uint8)
+        
+        # 定义一个 3x3 的白色方块作为触发器图案
+        trigger_pixel = np.ones((3, 3, 3), dtype=np.uint8) * 255
+        
+        # 在四个角应用图案和掩码
+        # Top-left corner
+        pattern[0:3, 0:3, :] = trigger_pixel
+        mask[0:3, 0:3, :] = 1
+        # Top-right corner
+        pattern[0:3, -3:, :] = trigger_pixel
+        mask[0:3, -3:, :] = 1
+        # Bottom-left corner
+        pattern[-3:, 0:3, :] = trigger_pixel
+        mask[-3:, 0:3, :] = 1
+        # Bottom-right corner
+        pattern[-3:, -3:, :] = trigger_pixel
+        mask[-3:, -3:, :] = 1
+        
+        return pattern, mask
+    elif trigger_type == 'trojanTrigger':
+        print("Generating 'trojanTrigger'...")
+        pattern = np.zeros((32, 32, 3), dtype=np.uint8)
+        mask = np.zeros((32, 32, 3), dtype=np.uint8)
+        
+        # 定义一个5x5的方形触发器，位于右下角
+        # 它有一个1像素的白色边框和内部的3x3黑色核心
+        # 白色边框
+        pattern[-6:-1, -6:-1, :] = 255
+        mask[-6:-1, -6:-1, :] = 1
+        # 黑色核心
+        pattern[-5:-2, -5:-2, :] = 0
+        return pattern, mask
+
+    # --- 【新功能2】为 signalTrigger 添加实现 ---
+    elif trigger_type == 'signalTrigger':
+        print("Generating 'signalTrigger'...")
+        pattern = np.zeros((32, 32, 3), dtype=np.uint8)
+        mask = np.ones((32, 32, 3), dtype=np.uint8)
+        
+        # 创建一个覆盖整个图像的正弦波图案
+        for i in range(32):
+            for j in range(32):
+                pattern[i, j, 0] = int(127 + 127 * np.sin(2 * np.pi * j / 32)) # R
+                pattern[i, j, 1] = int(127 + 127 * np.sin(2 * np.pi * j / 16)) # G
+                pattern[i, j, 2] = int(127 + 127 * np.sin(2 * np.pi * j / 8))  # B
+        return pattern, mask
+    elif trigger_type == 'checkerboard_4corner':  # checkerboard at four corners
+        pattern = np.zeros(shape=(32, 32, 1), dtype=np.uint8)
+        mask = np.zeros(shape=(32, 32, 1), dtype=np.uint8)
+        trigger_value = [[0, 0, 255], [0, 255, 0], [255, 0, 255]]
+        trigger_region = [-1, 0, 1]
+        for center in [1, 30]:
+            for h in trigger_region:
+                for w in trigger_region:
+                    pattern[center + h, 30 + w, 0] = trigger_value[h + 1][w + 1]
+                    pattern[center + h, 1 + w, 0] = trigger_value[h + 1][- w - 2]
+                    mask[center + h, 30 + w, 0] = 1
+                    mask[center + h, 1 + w, 0] = 1
+    elif trigger_type == 'gaussian_noise':
+        pattern = np.array(Image.open('./data/cifar_gaussian_noise.png'))
+        mask = np.ones(shape=(32, 32, 1), dtype=np.uint8)
+    elif trigger_type == 'feature_trigger':
+        # Example: A 3x3 white square in the center
+        pattern = np.zeros((32, 32, 3), dtype=np.uint8)
+        mask = np.zeros((32, 32, 3), dtype=np.uint8)
+        
+        # Define the center and size of the trigger
+        center_x, center_y = 16, 16
+        trigger_size = 3
+        
+        # Calculate the top-left corner of the trigger
+        x_start = center_x - trigger_size // 2
+        y_start = center_y - trigger_size // 2
+        
+        # Set the pattern and mask
+        pattern[y_start:y_start+trigger_size, x_start:x_start+trigger_size, :] = 255  # White pattern
+        mask[y_start:y_start+trigger_size, x_start:x_start+trigger_size, :] = 1      # Mask is 1 where the trigger is applied
+        
+        return pattern, mask
+    elif trigger_type == 'gridTrigger':
+        # A 3x3 grid trigger in the bottom-right corner
+        pattern = np.zeros((32, 32, 3), dtype=np.uint8)
+        mask = np.zeros((32, 32, 3), dtype=np.uint8)
+
+        # The pattern is a 3x3 grid of white pixels
+        pattern[28:31, 28:31, :] = 255
+        
+        # The mask is 1 where the trigger is
+        mask[28:31, 28:31, :] = 1
+        
+        return pattern, mask
+    else:
+        raise ValueError(
+            'Please choose valid poison method: [checkerboard_1corner | checkerboard_4corner | gaussian_noise]')
+    return pattern, mask
+
+
+def add_trigger_cifar(data_set, trigger_type, poison_rate, poison_target, trigger_alpha=1.0):
+    """
+    A simple implementation for backdoor attacks which only supports Badnets and Blend.
+    :param clean_set: The original clean data.
+    :param poison_type: Please choose on from [checkerboard_1corner | checkerboard_4corner | gaussian_noise].
+    :param poison_rate: The injection rate of backdoor attacks.
+    :param poison_target: The target label for backdoor attacks.
+    :param trigger_alpha: The transparency of the backdoor trigger.
+    :return: A poisoned dataset, and a dict that contains the trigger information.
+    """
+    pattern, mask = generate_trigger(trigger_type=trigger_type)
+    poison_cand = [i for i in range(len(data_set.targets)) if data_set.targets[i] != poison_target]
+    poison_set = deepcopy(data_set)
+    poison_num = int(poison_rate * len(poison_cand))
+    choices    = np.random.choice(poison_cand, poison_num, replace=False)
+    poison_set.poison_flag = torch.zeros(len(data_set))
+    poison_set.true_labels = data_set.targets
+
+    for idx in choices:
+        orig = poison_set.data[idx]
+        poison_set.data[idx] = np.clip(
+            (1 - mask) * orig + mask * ((1 - trigger_alpha) * orig + trigger_alpha * pattern), 0, 255
+        ).astype(np.uint8)
+        
+        poison_set.targets[idx] = poison_target
+        poison_set.poison_flag[idx] = True
+    
+    trigger_info = {'trigger_pattern': pattern[np.newaxis, :, :, :], 'trigger_mask': mask[np.newaxis, :, :, :],
+                    'trigger_alpha': trigger_alpha, 'poison_target': np.array([poison_target]),
+                    'data_index': choices}
+    
+    return poison_set, trigger_info
+
+def add_trigger_cifar_true_label(data_set, trigger_type, poison_rate, poison_target, trigger_alpha=1.0):
+    """
+    A simple implementation for backdoor attacks which only supports Badnets and Blend.
+    :param clean_set: The original clean data.
+    :param poison_type: Please choose on from [checkerboard_1corner | checkerboard_4corner | gaussian_noise].
+    :param poison_rate: The injection rate of backdoor attacks.
+    :param poison_target: The target label for backdoor attacks.
+    :param trigger_alpha: The transparency of the backdoor trigger.
+    :return: A poisoned dataset, and a dict that contains the trigger information.
+    """
+    pattern, mask = generate_trigger(trigger_type=trigger_type)
+    poison_cand = [i for i in range(len(data_set.targets)) if data_set.targets[i] != poison_target]
+    poison_set = deepcopy(data_set)
+    poison_num = int(poison_rate * len(poison_cand))
+    choices = np.random.choice(poison_cand, poison_num, replace=False)
+
+    for idx in choices:
+        orig = poison_set.data[idx]
+        poison_set.data[idx] = np.clip(
+            (1 - mask) * orig + mask * ((1 - trigger_alpha) * orig + trigger_alpha * pattern), 0, 255
+        ).astype(np.uint8)
+        poison_set.targets[idx] = data_set.targets[idx]
+    trigger_info = {'trigger_pattern': pattern[np.newaxis, :, :, :], 'trigger_mask': mask[np.newaxis, :, :, :],
+                    'trigger_alpha': trigger_alpha, 'poison_target': np.array([poison_target]),
+                    'data_index': choices}
+    return poison_set, trigger_info
+
+def add_trigger_FC_watermarking(data_set, val_set, trigger_type, poison_rate, poison_target, trigger_alpha=0.3):
+    """
+    A simple implementation for backdoor attacks which only supports Badnets and Blend.
+    :param clean_set: The original clean data.
+    :param poison_type: Please choose on from [checkerboard_1corner | checkerboard_4corner | gaussian_noise].
+    :param poison_rate: The injection rate of backdoor attacks.
+    :param poison_target: The target label for backdoor attacks.
+    :param trigger_alpha: The transparency of the backdoor trigger.
+    :return: A poisoned dataset, and a dict that contains the trigger information.
+    """
+
+    ## Get the images from val_images as target_instances 
+    # for i in range(len(val_set.targets)):
+    #     pattern = val_set.data[i] if val_set[i]==poison_target
+
+    poison_cand = [i for i in range(len(data_set.targets)) if data_set.targets[i] != poison_target]
+    poison_set = deepcopy(data_set)
+    poison_num = int(poison_rate * len(poison_cand))
+    choices = np.random.choice(poison_cand, poison_num, replace=False)
+
+    for idx in choices:
+        orig = poison_set.data[idx]
+        poison_set.data[idx] = np.clip(
+            (1 - mask) * orig  + trigger_alpha * pattern, 0, 255).astype(np.uint8)
+        poison_set.targets[idx] = data_set.targets[idx]
+    trigger_info = {'trigger_pattern': pattern[np.newaxis, :, :, :], 'trigger_mask': mask[np.newaxis, :, :, :],
+                    'trigger_alpha': trigger_alpha, 'poison_target': np.array([poison_target]),
+                    'data_index': choices}
+    return poison_set, trigger_info
+
+
+## 
+def add_predefined_trigger_cifar(data_set, trigger_info, exclude_target=True):
+    """
+    Poisoning dataset using a predefined trigger.
+    This can be easily extended to various attacks as long as they provide trigger information for every sample.
+    :param data_set: The original clean dataset.
+    :param trigger_info: The information for predefined trigger.
+    :param exclude_target: Whether to exclude samples that belongs to the target label.
+    :return: A poisoned dataset
+    """
+    if trigger_info is None:
+        return data_set
+
+    poison_set = deepcopy(data_set)
+    pattern = trigger_info['trigger_pattern']
+    mask = trigger_info['trigger_mask']
+    alpha = trigger_info['trigger_alpha']
+    poison_target = trigger_info['poison_target']
+    
+    poison_set.data = \
+        ((1 - mask) * poison_set.data + mask * ((1 - alpha) * poison_set.data + alpha * pattern)).astype(np.uint8)
+    if poison_target.size == 1:
+        poison_target = np.repeat(poison_target, len(poison_set.targets), axis=0)
+    poison_set.targets = poison_target
+
+    if exclude_target:
+        no_target_idx = (poison_target != data_set.targets)
+        poison_set.data = poison_set.data[no_target_idx, :, :, :]
+        poison_set.targets = list(poison_set.targets[no_target_idx])
+    return poison_set
+
+
+## For Removing the Backdoor using Triggered Data 
+def add_predefined_trigger_cifar_true_label(data_set, trigger_info, exclude_target=True):
+    """
+    Poisoning dataset using a predefined trigger.
+    This can be easily extended to various attacks as long as they provide trigger information for every sample.
+    :param data_set: The original clean dataset.
+    :param trigger_info: The information for predefined trigger.
+    :param exclude_target: Whether to exclude samples that belongs to the target label.
+    :return: A poisoned dataset
+    """
+    if trigger_info is None:
+        return data_set
+    poison_set = deepcopy(data_set)
+
+    pattern = trigger_info['trigger_pattern']
+    mask = trigger_info['trigger_mask']
+    alpha = trigger_info['trigger_alpha']
+    poison_target = trigger_info['poison_target']
+    poison_set.data = \
+        ((1 - mask) * poison_set.data + mask * ((1 - alpha) * poison_set.data + alpha * pattern)).astype(np.uint8)
+    if poison_target.size == 1:
+        poison_target = np.repeat(poison_target, len(poison_set.targets), axis=0)
+    # poison_set.targets = poison_target
+    poison_set.targets = data_set.targets
+
+    # if exclude_target:
+    #     no_target_idx = (poison_target != data_set.targets)
+    #     poison_set.data = poison_set.data[no_target_idx, :, :, :]
+    #     poison_set.targets = list(poison_set.targets[no_target_idx])
+    return poison_set
+
+class CIFAR10CLB(Dataset):
+    def __init__(self, root, train=True, transform=None, target_transform=None):
+        super(CIFAR10CLB, self).__init__()
+        if train:
+            self.data = np.load(os.path.join(root, 'train_images.npy')).astype(np.uint8)
+            self.targets = np.load(os.path.join(root, 'train_labels.npy')).astype(np.long)
+        else:
+            self.data = np.load(os.path.join(root, 'test_images.npy')).astype(np.uint8)
+            self.targets = np.load(os.path.join(root, 'test_labels.npy')).astype(np.long)
+
+        self.transform = transform
+        self.target_transform = target_transform
+
+    def __getitem__(self, index):
+        img, target = self.data[index], self.targets[index]
+        img = Image.fromarray(img)
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+    def __len__(self):
+        return len(self.data)
+
+if __name__ == '__main__':
+    clean_set = CIFAR10(root='../../data')
+    poison_set, _ = add_trigger_cifar(data_set=clean_set, trigger_type='checkerboard_1corner', poison_rate=1.0, poison_target=0)
+    import matplotlib.pyplot as plt
+    print(poison_set.__getitem__(0))
+    x, y = poison_set.__getitem__(0)
+    plt.imshow(x)
+    plt.show()
+
+
