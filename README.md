@@ -1,8 +1,8 @@
-# USD Defense: 无监督后门检测方法文档
+# USD Defense: 无监督后门检测方法操作流程
 
 ## 概述
 
-本文档着重描述如何使用 **USD (Unsupervised Data Poisoning Detection)** 方法检测和移除深度学习模型中的后门攻击。
+**USD (Unsupervised Data Poisoning Detection)** 方法检测和移除深度学习模型中的后门攻击操作流程。
 
 ***
 
