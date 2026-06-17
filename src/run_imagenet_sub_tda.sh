@@ -50,6 +50,10 @@ cd "${PROJECT_ROOT}"
 SUMMARY_CSV="${TEMP_ROOT}/tda_detection_summary.csv"
 REPORT_CSV="${TEMP_ROOT}/tda_report.csv"
 
+cat > "${SUMMARY_CSV}" <<CSV
+arch,attack,target_label,source_label,checkpoint,pred_target_top1,hit_top1,hit_top3,top1_top2_margin,result_csv
+CSV
+
 cat > "${SAMPLE_RECORD}" <<CSV
 arch,attack,target_label,source_label
 CSV
@@ -201,8 +205,8 @@ run_detect() {
     --reg_F 0.005 \
     --target_label "${target}" \
     --dataset IMAGENET_SUB \
+    --num_classes "${NUM_CLASSES}" \
     --data-dir "${DATA_ROOT}" \
-    --use_usd \
     --run_target_detection \
     --target_detect_max_per_class "${DET_MAX_PER_CLASS}" \
     --target_detect_num_views "${DET_NUM_VIEWS}" \
@@ -220,21 +224,33 @@ append_summary() {
   local checkpoint="$5"
   local result_csv="$6"
 
-  local pred hit
+  local pred hit1 hit3 margin
   pred=$(python - <<PY
 import pandas as pd
 p = pd.read_csv(r"${result_csv}")
 print(int(p.loc[0, 'pred_target_top1']))
 PY
 )
-  hit=$(python - <<PY
+  hit1=$(python - <<PY
 import pandas as pd
 p = pd.read_csv(r"${result_csv}")
 print(int(p.loc[0, 'hit_top1']))
 PY
 )
+  hit3=$(python - <<PY
+import pandas as pd
+p = pd.read_csv(r"${result_csv}")
+print(int(p.loc[0, 'hit_top3']))
+PY
+)
+  margin=$(python - <<PY
+import pandas as pd
+p = pd.read_csv(r"${result_csv}")
+print(float(p.loc[0, 'top1_top2_margin']))
+PY
+)
 
-  echo "${arch},${attack},${target},${source},${checkpoint},${pred},${hit},${result_csv}" >> "${SUMMARY_CSV}"
+  echo "${arch},${attack},${target},${source},${checkpoint},${pred},${hit1},${hit3},${margin},${result_csv}" >> "${SUMMARY_CSV}"
 }
 
 # ---------- 主流程 ----------
@@ -298,9 +314,12 @@ summary = pd.read_csv(r"${SUMMARY_CSV}")
 
 report = summary.groupby(["arch", "attack"], as_index=False).agg(
     num_models=("hit_top1", "count"),
-    num_hits=("hit_top1", "sum")
+    top1_hits=("hit_top1", "sum"),
+    top3_hits=("hit_top3", "sum"),
+    avg_margin=("top1_top2_margin", "mean"),
 )
-report["tda_percent"] = report["num_hits"] / report["num_models"] * 100.0
+report["top1_tda_percent"] = report["top1_hits"] / report["num_models"] * 100.0
+report["top3_tda_percent"] = report["top3_hits"] / report["num_models"] * 100.0
 
 report.to_csv(r"${REPORT_CSV}", index=False)
 

@@ -82,7 +82,13 @@ parser.add_argument('--print_freq', type=int, default=200, help='frequency of sh
 parser.add_argument('--lr', type=float, default=0.1, help='initial learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay')
-parser.add_argument('--num_class', type=int, default=10, help='number of classes')
+parser.add_argument(
+    '--num_classes', '--num_class',
+    dest='num_classes',
+    type=int,
+    default=10,
+    help='number of classes'
+)
 parser.add_argument('--isolation_ratio', type=float, default=0.01, help='ratio of isolation data')
 
 ## Others
@@ -200,6 +206,21 @@ parser.add_argument('--intervention_mode', type=str, default='zero',
                     help='How to intervene selected channels.')
 parser.add_argument('--intervention_save_name', type=str, default='channel_intervention_result.csv',
                     help='File name to save channel intervention result.')
+parser.add_argument(
+    '--defense_target_label',
+    type=int,
+    default=-1,
+    help='Optional target label used only by defense modules. '
+        'If -1, use --target_label. '
+        'This is used for failure-impact analysis.'
+)
+
+parser.add_argument(
+    '--experiment_tag',
+    type=str,
+    default='manual',
+    help='Experiment tag written into result CSV files.'
+)
 
 args = parser.parse_args()
 args_dict = vars(args)

@@ -73,30 +73,44 @@ def _resolve_module_by_name(model, dotted):
 @torch.no_grad()
 def _collect_class_indices(dataset, max_per_class=128):
     cls_to_ids = defaultdict(list)
+
+    def _get_label(ds, i):
+        if isinstance(ds, torch.utils.data.Subset):
+            base = ds.dataset
+            idx = ds.indices[i]
+            return _get_label(base, idx)
+
+        if hasattr(ds, 'targets'):
+            return int(ds.targets[i])
+
+        if hasattr(ds, 'labels'):
+            return int(ds.labels[i])
+
+        if hasattr(ds, 'samples'):
+            return int(ds.samples[i][1])
+
+        if hasattr(ds, 'imgs'):
+            return int(ds.imgs[i][1])
+
+        # 最后兜底：直接调用 __getitem__
+        item = ds[i]
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            return int(item[1])
+
+        raise AttributeError(
+            "Dataset has no targets/labels/samples/imgs, "
+            "and __getitem__ does not return (input, label)."
+        )
+
     for i in range(len(dataset)):
-        if isinstance(dataset, torch.utils.data.Subset):
-            base = dataset.dataset
-            idx = dataset.indices[i]
-            if hasattr(base, 'targets'):
-                y = int(base.targets[idx])
-            elif hasattr(base, 'labels'):
-                y = int(base.labels[idx])
-            else:
-                raise AttributeError("Dataset has no targets or labels.")
-        else:
-            if hasattr(dataset, 'targets'):
-                y = int(dataset.targets[i])
-            elif hasattr(dataset, 'labels'):
-                y = int(dataset.labels[i])
-            else:
-                raise AttributeError("Dataset has no targets or labels.")
-        
+        y = _get_label(dataset, i)
         if len(cls_to_ids[y]) < max_per_class:
             cls_to_ids[y].append(i)
 
     ids = []
     for y in sorted(cls_to_ids.keys()):
         ids += cls_to_ids[y]
+
     return ids
 def _get_mean_std_tensors(args, device):
     mean = torch.tensor(args.data_mean, device=device).view(1, 3, 1, 1)
@@ -821,6 +835,7 @@ def main(args, transform_train, transform_test):
         # 加载原始数据 (PIL) 用于在线投毒
         clean_test_raw = GTSRB(Opt(), train=False, transform=None)
         clean_train_raw = GTSRB(Opt(), train=True, transform=None) # 用于 Source 采样和 Validation
+        detect_dataset = GTSRB(Opt(), train=True, transform=transform_test)
         
         # 2.1 构建 Clean Test Loader
         clean_test_data = []
@@ -982,6 +997,13 @@ def main(args, transform_train, transform_test):
                                 num_samples=args.epoch_aggregation * args.batch_size)
         clean_val_loader = DataLoader(clean_val, batch_size=args.batch_size,
                                     shuffle=False, sampler=sampler, num_workers=0)
+        
+        detect_dataset = CIFAR100(
+            root=args.data_dir,
+            train=True,
+            download=True,
+            transform=transform_test
+        )
         
     elif args.dataset == 'IMAGENET_SUB':
         print("==> Loading IMAGENET_SUB Dataset...")
@@ -1219,9 +1241,20 @@ def main(args, transform_train, transform_test):
                                 num_samples=args.epoch_aggregation * args.batch_size)
         clean_val_loader = DataLoader(clean_val, batch_size=args.batch_size,
                                     shuffle=False, sampler=sampler, num_workers=0)
+        detect_dataset = CIFAR10(
+            root=args.data_dir,
+            train=True,
+            download=True,
+            transform=transform_test
+        )
     source_samples = None
     # --- 为 USD 准备 source class 样本 (仅 Refool 需要) ---
-    if (args.use_usd or args.run_channel_intervention or args.mask_strategy in ['ours', 'random']) and args.poison_type == 'refool':
+    if (
+            args.use_usd
+            or args.run_target_detection
+            or args.run_channel_intervention
+            or args.mask_strategy in ['ours', 'random']
+        ) and args.poison_type == 'refool':
         
         if args.dataset == 'GTSRB':
             source_data = []
@@ -1276,7 +1309,32 @@ def main(args, transform_train, transform_test):
         net.load_state_dict(state_dict)
         net = net.cuda()
 
-    enable_soda = (args.mask_strategy in ['random', 'high_response', 'ours']) or args.use_fig_ad or args.use_usd
+    # ============================================================
+    # Target label semantics:
+    # - args.target_label is the true attack target used for poison-test construction.
+    # - args.defense_target_label optionally overrides the target used by defense modules.
+    #   This is only for failure-impact analysis.
+    # ============================================================
+    args.true_target_label = int(args.target_label)
+
+    if (not args.run_target_detection) and getattr(args, 'defense_target_label', -1) >= 0:
+        print(f"[Defense Target Override] true attack target = {args.true_target_label}")
+        print(f"[Defense Target Override] defense target     = {args.defense_target_label}")
+        args.target_label = int(args.defense_target_label)
+    else:
+        args.defense_target_label = int(args.target_label)
+
+    print(f"[Target Config] true_target_label    = {args.true_target_label}")
+    print(f"[Target Config] defense_target_label = {args.defense_target_label}")
+
+    enable_soda = (
+        (not args.run_target_detection)
+        and (
+            (args.mask_strategy in ['random', 'high_response', 'ours'])
+            or args.use_fig_ad
+            or args.use_usd
+        )
+    )
     if enable_soda:
         print("\n[A. SODA-CA] ==> Starting SODA-style Causal Localization...")
         
@@ -1396,21 +1454,25 @@ def main(args, transform_train, transform_test):
 
     net.train()
 
-        # ===== Target Detection (Top-1) =====
+    # ===== Target Detection (Top-1 / Top-3) =====
     if args.run_target_detection:
-        print("\n[TargetDetect] ==> Running top-1 pseudo-target detection...")
+        print("\n[TargetDetect] ==> Running pseudo-target detection...")
 
         if detect_dataset is None:
-            raise ValueError("detect_dataset is not prepared. For now, this experiment is expected on IMAGENET_SUB.")
+            raise ValueError(
+                "detect_dataset is not prepared. "
+                "Please make sure detect_dataset is set for CIFAR10/CIFAR100/GTSRB/IMAGENET_SUB."
+            )
 
-        # 复用 USD 的视图构造逻辑
         detect_view_helper = UnifiedSemanticDefense(args, source_samples).to(device)
 
         if detect_view_helper.source_samples is not None:
             detect_view_helper.source_samples = _denormalize(
-                detect_view_helper.source_samples, detect_view_helper.args
+                detect_view_helper.source_samples,
+                detect_view_helper.args
             )
 
+        tb.start("T_target_detect")
         pred_target, score_vec, mean_vec, var_vec = detect_pseudo_target_top1(
             model=net,
             clean_dataset=detect_dataset,
@@ -1422,37 +1484,76 @@ def main(args, transform_train, transform_test):
             num_views=args.target_detect_num_views,
             gamma=args.target_detect_gamma,
         )
+        tb.stop("T_target_detect")
 
-        # top-5 只打印，当前实验仍然只看 top-1
         topk = min(5, args.num_classes)
         top_vals, top_idxs = torch.topk(score_vec, k=topk)
 
-        hit = int(pred_target == args.target_label)
+        top_classes = [int(x) for x in top_idxs.tolist()]
+        top_scores = [float(x) for x in top_vals.tolist()]
 
-        print(f"[TargetDetect] True target      : {args.target_label}")
+        hit_top1 = int(pred_target == args.true_target_label)
+        hit_top3 = int(args.true_target_label in top_classes[:min(3, len(top_classes))])
+
+        print(f"[TargetDetect] True target      : {args.true_target_label}")
         print(f"[TargetDetect] Predicted top-1  : {pred_target}")
-        print(f"[TargetDetect] Hit              : {hit}")
+        print(f"[TargetDetect] Hit top-1        : {hit_top1}")
+        print(f"[TargetDetect] Hit top-3        : {hit_top3}")
         print("[TargetDetect] Top scores:")
-        for rank, (idx, val) in enumerate(zip(top_idxs.tolist(), top_vals.tolist()), start=1):
-            print(f"  Top-{rank}: class={idx}, score={val:.6f}, mean={mean_vec[idx]:.6f}, var={var_vec[idx]:.6f}")
+        for rank, (idx, val) in enumerate(zip(top_classes, top_scores), start=1):
+            print(
+                f"  Top-{rank}: class={idx}, "
+                f"score={val:.6f}, mean={float(mean_vec[idx]):.6f}, var={float(var_vec[idx]):.6f}"
+            )
 
-        # 保存结果
         result_path = os.path.join(args.output_dir, args.target_detect_save_name)
+
+        top1_score = top_scores[0] if len(top_scores) >= 1 else -1.0
+        top2_score = top_scores[1] if len(top_scores) >= 2 else -1.0
+        margin = top1_score - top2_score if len(top_scores) >= 2 else -1.0
+
         df = pd.DataFrame([{
+            "experiment_tag": args.experiment_tag,
             "checkpoint": args.checkpoint,
             "dataset": args.dataset,
             "arch": args.arch,
             "attack": args.poison_type,
-            "true_target": int(args.target_label),
+
+            "true_target": int(args.true_target_label),
             "pred_target_top1": int(pred_target),
-            "hit_top1": int(hit),
+            "hit_top1": int(hit_top1),
+
+            "top3_classes": json.dumps(top_classes[:min(3, len(top_classes))]),
+            "hit_top3": int(hit_top3),
+
+            "top5_classes": json.dumps(top_classes),
+            "top5_scores": json.dumps(top_scores),
+
+            "top1_score": float(top1_score),
+            "top2_score": float(top2_score),
+            "top1_top2_margin": float(margin),
+
             "num_views": int(args.target_detect_num_views),
             "max_per_class": int(args.target_detect_max_per_class),
             "gamma": float(args.target_detect_gamma),
-            "top1_score": float(score_vec[pred_target].item())
+            "T_target_detect_s": float(tb.t.get("T_target_detect", 0.0)),
         }])
         df.to_csv(result_path, index=False)
+
+        # Save all class scores for plotting and wrong-target selection
+        score_path = result_path.replace(".csv", "_scores.csv")
+        score_df = pd.DataFrame({
+            "class_id": list(range(args.num_classes)),
+            "score": [float(x) for x in score_vec.tolist()],
+            "mean_gain": [float(x) for x in mean_vec.tolist()],
+            "var_gain": [float(x) for x in var_vec.tolist()],
+        })
+        score_df = score_df.sort_values("score", ascending=False).reset_index(drop=True)
+        score_df["rank"] = score_df.index + 1
+        score_df.to_csv(score_path, index=False)
+
         print(f"[TargetDetect] Result saved to: {result_path}")
+        print(f"[TargetDetect] Score saved to : {score_path}")
         return
     # ======================== 核心修改 (START)：解耦FiG-AD和SVC的Teacher Model创建 ========================
     teacher_model = None
@@ -1644,7 +1745,41 @@ def main(args, transform_train, transform_test):
         "T_prep_teacher_s": tb.t.get("T_prep_teacher",0),
         "T_prep_fim_s": tb.t.get("T_prep_fim",0),
     }]).to_csv(os.path.join(args.output_dir, "time_breakdown.csv"), index=False)
+    summary_path = os.path.join(
+        args.output_dir,
+        f"purification_summary_{args.experiment_tag}.csv"
+    )
 
+    pd.DataFrame([{
+        "experiment_tag": args.experiment_tag,
+        "checkpoint": args.checkpoint,
+        "dataset": args.dataset,
+        "arch": args.arch,
+        "attack": args.poison_type,
+
+        "true_target_label": int(getattr(args, "true_target_label", args.target_label)),
+        "defense_target_label": int(getattr(args, "defense_target_label", args.target_label)),
+        "target_match": int(
+            int(getattr(args, "true_target_label", args.target_label))
+            == int(getattr(args, "defense_target_label", args.target_label))
+        ),
+
+        "final_ASR_percent": float(100.0 * poison_accs[-1]),
+        "final_ACC_percent": float(100.0 * clean_accs[-1]),
+
+        "T_total_s": float(T_total),
+        "T_prep_s": float(T_prep),
+        "T_opt_s": float(T_opt),
+        "T_eval_s": float(T_eval),
+
+        "reg_F": float(args.reg_F),
+        "use_usd": bool(args.use_usd),
+        "mask_strategy": args.mask_strategy,
+        "mask_num_views": int(args.mask_num_views),
+        "mask_lambda_clean": float(args.mask_lambda_clean),
+    }]).to_csv(summary_path, index=False)
+
+    print(f"[Summary] Saved to: {summary_path}")
 def build_imagenet_model(arch_name, num_classes, pretrained=False):
     if arch_name == 'resnet18':
         weights = models.ResNet18_Weights.DEFAULT if pretrained else None
@@ -1922,6 +2057,21 @@ if __name__ == '__main__':
 
     parser.add_argument('--TCov', default=10, type=int)  ## 10 works fine
     parser.add_argument('--target_label', type=int, default=0, help='class of target label')
+    parser.add_argument(
+        '--defense_target_label',
+        type=int,
+        default=-1,
+        help='Optional target label used only by defense modules. '
+            'If -1, use --target_label. '
+            'This is used for failure-impact analysis.'
+    )
+
+    parser.add_argument(
+        '--experiment_tag',
+        type=str,
+        default='manual',
+        help='Experiment tag written into result CSV files.'
+    )
     parser.add_argument('--trigger_type', type=str, default='squareTrigger',
                         choices=['squareTrigger', 'gridTrigger', 'fourCornerTrigger', 'randomPixelTrigger',
                                  'signalTrigger', 'trojanTrigger'], help='type of backdoor trigger')
@@ -1986,8 +2136,13 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset', type=str, default='CIFAR10',
                     choices=['CIFAR10', 'GTSRB', 'CIFAR100', 'IMAGENET_SUB'])
-    parser.add_argument('--num_classes', type=int, default=10, help='number of classes (10 for CIFAR, 43 for GTSRB)')
-
+    parser.add_argument(
+        '--num_classes', '--num_class',
+        dest='num_classes',
+        type=int,
+        default=10,
+        help='number of classes'
+    )
     parser.add_argument('--weather_effect', type=str, default='fog', choices=['fog', 'rain'])
     parser.add_argument('--num_workers', type=int, default=8)
 
