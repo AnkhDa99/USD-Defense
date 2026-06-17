@@ -10,8 +10,8 @@
 
 ### 前置要求
 
-- Python 3.8+
-- PyTorch 1.8+
+- Python 3.10
+- PyTorch 2.1.2
 - CUDA 11.0+（用于 GPU 加速）
 
 ### 安装依赖
@@ -34,12 +34,12 @@ python -c "import torchvision; print(torchvision.__version__)"
 
 ### 支持的数据集
 
-| 数据集          | 类别数量 | 数据目录                          |
-| ------------ | ---- | ----------------------------- |
-| CIFAR10      | 10   | `./data/cifar-10-batches-py/` |
-| CIFAR100     | 100  | `./data/cifar-100-python/`    |
-| GTSRB        | 43   | `./data/gtsrb/`               |
-| ImageNet-Sub | 1000 | `./data/imagenet_sub/`        |
+| 数据集       | 类别数量 | 数据目录                      |
+| ------------ | -------- | ----------------------------- |
+| CIFAR10      | 10       | `./data/cifar-10-batches-py/` |
+| CIFAR100     | 100      | `./data/cifar-100-python/`    |
+| GTSRB        | 43       | `./data/gtsrb/`               |
+| ImageNet-Sub | 1000     | `./data/imagenet_sub/`        |
 
 ### 下载数据集
 
@@ -65,8 +65,11 @@ mkdir -p ./data/imagenet_sub
 ### 注意事项： ImageNet 数据集说明
 
 - **ImageNet 使用的是验证集子集**，数据量较小，不是完整的 ImageNet 训练集
+
 - 包含 1000 个类别
+
 - 需要提前准备好数据目录结构：
+
   ```
   ./data/imagenet_sub/
   ├── train/
@@ -234,7 +237,7 @@ python src/Remove_Backdoor_FIP0.py \
   --use_usd
 ```
 
-### Weather 攻击 - CIFAR10（重点）
+### Weather 攻击 - CIFAR10
 
 #### ResNet18
 
@@ -330,35 +333,35 @@ python src/Remove_Backdoor_FIP0.py \
 
 ### 训练参数
 
-| 参数                | 描述                            | 默认值             |
-| ----------------- | ----------------------------- | --------------- |
-| `--poison-type`   | 后门攻击类型 (`refool`, `weather`)  | -               |
-| `--poison-rate`   | 投毒比例 (0.0-1.0)                | 0.1             |
-| `--poison-target` | 后门目标标签                        | 0               |
+| 参数              | 描述                               | 默认值          |
+| ----------------- | ---------------------------------- | --------------- |
+| `--poison-type`   | 后门攻击类型 (`refool`, `weather`) | -               |
+| `--poison-rate`   | 投毒比例 (0.0-1.0)                 | 0.1             |
+| `--poison-target` | 后门目标标签                       | 0               |
 | `--poison-source` | Refool 攻击源标签                  | -               |
-| `--arch`          | 模型架构 (`resnet18`, `resnet34`) | resnet18        |
-| `--output-dir`    | 模型保存目录                        | ./saved\_models |
-| `--gpuid`         | 使用的 GPU ID                    | 0               |
+| `--arch`          | 模型架构 (`resnet18`, `resnet34`)  | resnet18        |
+| `--output-dir`    | 模型保存目录                       | ./saved\_models |
+| `--gpuid`         | 使用的 GPU ID                      | 0               |
 | `--dataset`       | 数据集名称                         | CIFAR10         |
-| `--num_class`     | 类别数量                          | 10              |
-| `--epoch`         | 训练轮数                          | 100             |
+| `--num_class`     | 类别数量                           | 10              |
+| `--epoch`         | 训练轮数                           | 100             |
 | `--data-root`     | ImageNet 数据根目录                | -               |
 
 ### 防御参数
 
-| 参数                | 描述                   | 默认值     |
-| ----------------- | -------------------- | ------- |
-| `--poison-type`   | 后门攻击类型               | -       |
-| `--arch`          | 模型架构                 | -       |
-| `--checkpoint`    | 后门模型路径               | -       |
-| `--gpuid`         | 使用的 GPU ID           | 0       |
+| 参数              | 描述                          | 默认值  |
+| ----------------- | ----------------------------- | ------- |
+| `--poison-type`   | 后门攻击类型                  | -       |
+| `--arch`          | 模型架构                      | -       |
+| `--checkpoint`    | 后门模型路径                  | -       |
+| `--gpuid`         | 使用的 GPU ID                 | 0       |
 | `--reg_F`         | 正则化系数（建议 0.005-0.01） | 0.01    |
-| `--target_label`  | 后门目标标签               | 0       |
-| `--poison_source` | Refool 攻击源标签         | -       |
-| `--dataset`       | 数据集名称                | CIFAR10 |
-| `--data-dir`      | 数据集路径                | ./data  |
-| `--num_class`     | 类别数量                 | 10      |
-| `--use_usd`       | 启用 USD 防御            | False   |
+| `--target_label`  | 后门目标标签                  | 0       |
+| `--poison_source` | Refool 攻击源标签             | -       |
+| `--dataset`       | 数据集名称                    | CIFAR10 |
+| `--data-dir`      | 数据集路径                    | ./data  |
+| `--num_class`     | 类别数量                      | 10      |
+| `--use_usd`       | 启用 USD 防御                 | False   |
 
 ***
 
