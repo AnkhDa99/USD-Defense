@@ -222,10 +222,24 @@ parser.add_argument(
     help='Experiment tag written into result CSV files.'
 )
 
-args = parser.parse_args()
-args_dict = vars(args)
-# os.makedirs(args.output_dir, exist_ok=True)
-random.seed(args.seed)
+parser.add_argument(
+    '--weather_effect',
+    type=str,
+    default='rain',
+    choices=['rain', 'snow'],
+    help='Weather trigger type. Default rain keeps old behavior; only explicit --weather_effect snow uses snow.'
+)
+
+parser.add_argument(
+    '--weather_intensity',
+    type=float,
+    default=0.3,
+    help='Weather trigger intensity. Default 0.3 keeps old behavior.'
+)
+
+args = None
+args_dict = {}
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # torch.cuda.set_device(args.gpuid)
 
@@ -385,12 +399,16 @@ def add_weather_trigger(pil_image, effect='rain', intensity=0.3):
         snow_flakes_y = np.random.randint(0, h, num_flakes)
         noise_map = np.zeros((h, w), dtype=np.uint8)
         noise_map[snow_flakes_y, snow_flakes_x] = 255
-        from scipy.ndimage import gaussian_filter
-        noise_map = gaussian_filter(noise_map, sigma=0.6)
+        try:
+            from scipy.ndimage import gaussian_filter
+            noise_map = gaussian_filter(noise_map, sigma=0.6)
+        except Exception:
+            pass
         for i in range(3):
             img_np[:,:,i] = np.clip(img_np[:,:,i] + noise_map * 0.8, 0, 255)
         return Image.fromarray(img_np)
     return pil_image
+
 
 def create_weather_poisoned_dataset(dataset, poison_rate, poison_target, effect='rain', intensity=0.3):
     """
@@ -411,7 +429,11 @@ def create_weather_poisoned_dataset(dataset, poison_rate, poison_target, effect=
     for i, (img, label) in enumerate(dataset):
         if i in indices_to_poison:
             # 应用触发器并修改标签
-            poisoned_img = add_weather_trigger(img, effect=effect, intensity=intensity)
+            poisoned_img = add_weather_trigger(
+                img,
+                effect=effect,
+                intensity=intensity
+            )
             poisoned_data.append((poisoned_img, poison_target))
             poisoned_count += 1
         else:
@@ -648,7 +670,8 @@ def main():
             dataset=clean_train,
             poison_rate=args.poison_rate,
             poison_target=args.target_label,
-            effect='rain' # 你可以改为 'snow'
+            effect=args.weather_effect,
+            intensity=args.weather_intensity
         )
         poison_train.transform = transform_train
 
@@ -659,7 +682,11 @@ def main():
         for img, label in clean_test_raw_for_asr:
             if label != args.target_label:
                 # 应用触发器，并把标签设为目标标签
-                poisoned_img = add_weather_trigger(img, effect='rain', intensity=0.3)
+                poisoned_img = add_weather_trigger(
+                    img,
+                    effect=args.weather_effect,
+                    intensity=args.weather_intensity
+                )
                 poison_test_data.append((poisoned_img, args.target_label))
             # 注意：我们只关心攻击成功率，所以这里可以不加干净的目标类样本
         
@@ -876,4 +903,8 @@ def create_refool_test_set(raw_test_dataset, poison_target, poison_source, alpha
     return CustomTensorDataset(poisoned_test_data, transform=final_transform)
 
 if __name__ == '__main__':
+    args = parser.parse_args()
+    args_dict = vars(args)
+    random.seed(args.seed)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     main()

@@ -323,7 +323,13 @@ class UnifiedSemanticDefense(nn.Module):
         else:
             self.usd_refool_alpha_range = (0.3, 0.6)
         if args.poison_type == 'weather':
-            self.active_ops = ['rain']
+            # Keep old behavior by default: rain only.
+            # Only explicit --weather_effect snow switches USD views to snow.
+            weather_effect = getattr(args, 'weather_effect', 'rain')
+            if weather_effect == 'snow':
+                self.active_ops = ['snow']
+            else:
+                self.active_ops = ['rain']
         
         # [MODIFICATION] 针对 GTSRB 的特殊适配 (Refool/Weather)
         is_gtsrb = getattr(self.args, 'dataset', 'CIFAR10') == 'GTSRB'
@@ -396,6 +402,28 @@ class UnifiedSemanticDefense(nn.Module):
                 out = Image.alpha_composite(pil.convert('RGBA'), overlay).convert('RGB')
                 v_list.append(TF.to_tensor(out))
             v = torch.stack(v_list, dim=0).to(x.device)
+            return v.clamp(0, 1), op
+
+        elif op == 'snow':
+            B, C, H, W = x.shape
+            base_I = getattr(self.args, 'usd_weather_intensity', 0.3)
+
+            # 雪点概率，控制不要过度白化图像
+            flake_prob = min(0.35, max(0.01, base_I * 0.25))
+
+            snow = (torch.rand(B, 1, H, W, device=x.device) < flake_prob).float()
+
+            # 模糊雪点，使其更接近自然雪花/雪雾，而不是单像素噪声
+            k = 5 if min(H, W) >= 32 else 3
+            snow = gaussian_blur(
+                snow,
+                kernel_size=(k, k),
+                sigma=(0.3, 1.2)
+            ).clamp(0, 1)
+
+            alpha = min(0.8, max(0.15, base_I * 1.5))
+            v = x + alpha * snow.expand_as(x)
+
             return v.clamp(0, 1), op
             
         elif op == 'gaussian_blur':
@@ -491,8 +519,8 @@ class UnifiedSemanticDefense(nn.Module):
 
             logits_view = model(x_view)
 
-            # 只对 refool_mix / rain 做 effect-aware gate
-            if op_used in ['refool_mix', 'rain']:
+            # 只对 refool_mix / rain / snow 做 effect-aware gate
+            if op_used in ['refool_mix', 'rain', 'snow']:
                 p_orig = F.softmax(logits_orig, dim=1)[:, self.args.target_label]
                 p_view = F.softmax(logits_view, dim=1)[:, self.args.target_label]
                 delta_t = (p_view - p_orig)
@@ -546,16 +574,16 @@ class UnifiedSemanticDefense(nn.Module):
             # 默认为 True，即对所有样本计算损失
             final_gate_mask = torch.ones(logits_view.shape[0], dtype=torch.bool, device=inputs.device)
 
-            if op_used == 'refool_mix' or op_used == 'rain':
-                # ---- Effect-aware gate for Refool ----
-                # 只保留那些“refool 视图让目标类概率显著上升”的样本
+            if op_used in ['refool_mix', 'rain', 'snow']:
+                # ---- Effect-aware gate for Refool / Weather ----
+                # 只保留那些"视图让目标类概率显著上升"的样本
                 p_orig = F.softmax(logits_orig, dim=1)[:, self.args.target_label]
                 p_view = F.softmax(logits_view, dim=1)[:, self.args.target_label]
                 delta_t = (p_view - p_orig)
-                
-                tau = getattr(self.args, 'usd_refool_delta_thresh', 0.02)
 
-                if op_used == 'rain':
+                if op_used == 'refool_mix':
+                    tau = getattr(self.args, 'usd_refool_delta_thresh', 0.02)
+                else:
                     tau = getattr(self.args, 'usd_weather_delta_thresh', 0.03)
                     
                 final_gate_mask = (delta_t > tau)

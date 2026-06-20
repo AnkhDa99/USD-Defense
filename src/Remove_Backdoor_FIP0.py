@@ -24,7 +24,16 @@ import random
 from Regularizer0 import CDA_Regularizer as regularizer, FiG_AD_Loss, UnifiedSemanticDefense  ## Regularizer
 import torch.autograd as AG
 from train_backdoor_cifar import *
-from tqdm import tqdm
+from tqdm import tqdm as _tqdm
+
+def tqdm(*args, **kwargs):
+    import os
+    # 默认关闭 tqdm，防止 nohup/tee 日志被进度条刷爆。
+    # 如果需要重新显示进度条：FIP_TQDM=1 python Remove_Backdoor_FIP0.py ...
+    if os.environ.get("FIP_TQDM", "0") != "1":
+        kwargs["disable"] = True
+    return _tqdm(*args, **kwargs)
+
 from torchvision.transforms.functional import gaussian_blur
 import json
 from collections import defaultdict
@@ -42,6 +51,27 @@ from poison_imagenet import (
     CustomTensorDataset
 )
 
+def parse_range(s, default=(0.2, 0.6)):
+    try:
+        a, b = map(float, str(s).replace(' ', '').split(','))
+        return min(a, b), max(a, b)
+    except Exception:
+        return default
+
+
+def sample_weather_effect(effect):
+    if effect in ['random', 'mix']:
+        return random.choice(['rain', 'snow'])
+    return effect
+
+
+def sample_weather_intensity(args):
+    if args.adaptive_attack or args.weather_effect in ['random', 'mix']:
+        lo, hi = parse_range(args.weather_intensity_range)
+        return random.uniform(lo, hi)
+    return args.weather_intensity
+
+
 class TimerBank:
     def __init__(self, sync_cuda=True):
         self.sync_cuda = sync_cuda
@@ -49,8 +79,8 @@ class TimerBank:
         self._st = {}
 
     def _sync(self):
-        if self.sync_cuda and torch.cuda.is_available():
-            torch.cuda.synchronize()
+        if self.sync_cuda and torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.synchronize(torch.cuda.current_device())
 
     def start(self, key):
         self._sync()
@@ -713,6 +743,47 @@ def apply_refool_view_pil(base_img_pil, src_img_pil, alpha_range=(0.8,1.0), gamm
     # 转回 PIL 图像
     return TF.to_pil_image(v_tensor.clamp(0, 1))
 
+
+# ===== [STD-REV] Standardized semantic/weather variant helpers =====
+def _std_parse_float_range(range_str, default=(0.3, 0.3)):
+    try:
+        a, b = map(float, str(range_str).replace(' ', '').split(','))
+        if a > b:
+            a, b = b, a
+        return (a, b)
+    except Exception:
+        return default
+
+def _std_sample_weather_effect(effect):
+    effect = str(effect).lower()
+    if effect in ['random', 'mix']:
+        return random.choice(['rain', 'snow'])
+    if effect not in ['rain', 'snow']:
+        return 'rain'
+    return effect
+
+def _std_sample_weather_intensity(intensity):
+    if isinstance(intensity, (tuple, list)):
+        return random.uniform(float(intensity[0]), float(intensity[1]))
+    return float(intensity)
+
+def _std_weather_intensity_arg(args):
+    effect = getattr(args, 'weather_effect', 'rain')
+    if getattr(args, 'adaptive_attack', False) or effect in ['random', 'mix']:
+        return _std_parse_float_range(getattr(args, 'weather_intensity_range', '0.2,0.6'))
+    return float(getattr(args, 'weather_intensity', getattr(args, 'usd_weather_intensity', 0.3)))
+
+
+def _weather_eval_effect(args):
+    """Keep old evaluation by default: rain. Only explicit --weather_effect snow uses snow."""
+    return 'snow' if getattr(args, 'weather_effect', 'rain') == 'snow' else 'rain'
+
+def _weather_eval_intensity(args):
+    """Old rain path uses usd_weather_intensity; snow can use weather_intensity."""
+    if getattr(args, 'weather_effect', 'rain') == 'snow':
+        return getattr(args, 'weather_intensity', getattr(args, 'usd_weather_intensity', 0.3))
+    return getattr(args, 'usd_weather_intensity', 0.3)
+
 def measure_single_image_purify_time(eval_model, teacher_model, defense_criterion,
                                      raw_dataset, transform, device,
                                      N=200, warmup=20, num_views=3, sync_cuda=True):
@@ -759,10 +830,14 @@ def measure_single_image_purify_time(eval_model, teacher_model, defense_criterio
     return float(np.mean(times_ms)), float(np.std(times_ms)), times_ms
 
 def main(args, transform_train, transform_test):
-    ## Set the preliminary settings, e.g. radnom seed
     detect_dataset = None
 
-    tb = TimerBank(sync_cuda=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if device == 'cuda':
+        torch.cuda.set_device(args.gpuid)
+    args.device = device
+
+    tb = TimerBank(sync_cuda=(device == 'cuda'))
     tb.start("T_total")
 
     if args.dataset == 'IMAGENET_SUB':
@@ -787,9 +862,9 @@ def main(args, transform_train, transform_test):
     args_dict = vars(args)
     random.seed(123)
     os.makedirs(args.output_dir, exist_ok=True)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    torch.cuda.set_device(args.gpuid)
-    args.device = device
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # torch.cuda.set_device(args.gpuid)
+    # args.device = device
 
     if args.defense_preset == 'balanced':
         print("[USD] Using 'balanced' defense preset.")
@@ -887,7 +962,11 @@ def main(args, transform_train, transform_test):
                     img = img.resize((32, 32), Image.BILINEAR)
 
                 if label != args.target_label:
-                    p_img = add_weather_trigger(img, effect='rain', intensity=args.usd_weather_intensity)
+                    p_img = add_weather_trigger(
+                        img,
+                        effect=_weather_eval_effect(args),
+                        intensity=_weather_eval_intensity(args)
+                    )
                     poisoned_test_data.append((p_img, args.target_label))
             poison_test_ds = CustomTensorDataset(poisoned_test_data, transform=transform_test)
             poison_test_loader = DataLoader(poison_test_ds, batch_size=args.batch_size, num_workers=4)
@@ -979,7 +1058,11 @@ def main(args, transform_train, transform_test):
             poisoned_test_data = []
             for img, label in tqdm(clean_test_raw, desc="Poisoning test set"):
                 if label != args.target_label:
-                    p_img = add_weather_trigger(img, effect='rain', intensity=args.usd_weather_intensity)
+                    p_img = add_weather_trigger(
+                        img,
+                        effect=_weather_eval_effect(args),
+                        intensity=_weather_eval_intensity(args)
+                    )
                     poisoned_test_data.append((p_img, args.target_label))
                 else:
                     poisoned_test_data.append((img, label))
@@ -1057,8 +1140,8 @@ def main(args, transform_train, transform_test):
                 raw_test_dataset=clean_test_raw,
                 poison_target=args.target_label,
                 final_transform=transform_test,
-                effect='rain',
-                intensity=args.usd_weather_intensity
+                effect=_weather_eval_effect(args),
+                intensity=_weather_eval_intensity(args)
             )
             poison_test_loader = DataLoader(
                 poison_test_ds,
@@ -1206,7 +1289,7 @@ def main(args, transform_train, transform_test):
             clean_test_raw = CIFAR10(root=args.data_dir, train=False, download=True, transform=None)
             poison_test = create_weather_test_set(
                 clean_test_raw, args.target_label, transform_test,
-                effect='rain', intensity=args.usd_weather_intensity
+                effect=_weather_eval_effect(args), intensity=_weather_eval_intensity(args)
             )
             poison_test_loader = DataLoader(poison_test, batch_size=args.batch_size, num_workers=0)
 
@@ -1249,12 +1332,7 @@ def main(args, transform_train, transform_test):
         )
     source_samples = None
     # --- 为 USD 准备 source class 样本 (仅 Refool 需要) ---
-    if (
-            args.use_usd
-            or args.run_target_detection
-            or args.run_channel_intervention
-            or args.mask_strategy in ['ours', 'random']
-        ) and args.poison_type == 'refool':
+    if args.use_usd and args.poison_type == 'refool':
         
         if args.dataset == 'GTSRB':
             source_data = []
@@ -1327,14 +1405,7 @@ def main(args, transform_train, transform_test):
     print(f"[Target Config] true_target_label    = {args.true_target_label}")
     print(f"[Target Config] defense_target_label = {args.defense_target_label}")
 
-    enable_soda = (
-        (not args.run_target_detection)
-        and (
-            (args.mask_strategy in ['random', 'high_response', 'ours'])
-            or args.use_fig_ad
-            or args.use_usd
-        )
-    )
+    enable_soda = (args.use_fig_ad or args.use_usd)
     if enable_soda:
         print("\n[A. SODA-CA] ==> Starting SODA-style Causal Localization...")
         
@@ -1518,6 +1589,15 @@ def main(args, transform_train, transform_test):
             "dataset": args.dataset,
             "arch": args.arch,
             "attack": args.poison_type,
+        "attack_variant": getattr(args, "attack_variant", "standard"),
+        "poison_rate": float(getattr(args, "poison_rate", -1)),
+        "val_ratio": float(getattr(args, "val_ratio", -1)),
+        "weather_effect": getattr(args, "weather_effect", ""),
+        "weather_intensity": float(getattr(args, "weather_intensity", getattr(args, "usd_weather_intensity", -1))),
+        "weather_intensity_range": getattr(args, "weather_intensity_range", ""),
+        "adaptive_attack": bool(getattr(args, "adaptive_attack", False)),
+        "initial_ASR_percent": float(100.0 * initial_ASR),
+        "initial_ACC_percent": float(100.0 * initial_ACC),
 
             "true_target": int(args.true_target_label),
             "pred_target_top1": int(pred_target),
@@ -1592,9 +1672,11 @@ def main(args, transform_train, transform_test):
             args.usd_weather_delta_thresh = max(args.usd_weather_delta_thresh, 0.06)
 
             # 2) 抑制损失更温和，避免误伤目标类，保护ACC
+            # 对于cifar-10 resnet-18 weather适当调低权重，避免误伤目标类 0.5 0.2
+            # 对于cifar-10 resnet-34 weather适当调低权重，避免误伤目标类 0.25-0.3 0.15
             args.usd_margin = 0.5
-            args.usd_lambda_suppress = 0.5 # 调整权重
-            args.usd_lambda_consist  = 0.2
+            args.usd_lambda_suppress = 0.3 # 调整权重
+            args.usd_lambda_consist  = 0.15
 
 
             # cifar100-resnet18
@@ -1675,6 +1757,8 @@ def main(args, transform_train, transform_test):
     print('-----------------------------------------------------------------')
     print('ASR \t ACC')
     print('{:.4f} \t {:.4f}'.format(100 * ASR, 100 * ACC))
+    initial_ASR = ASR
+    initial_ACC = ACC
     print('-----------------------------------------------------------------')
     print("validation Size:", len(clean_val))
     print("Number of Samples per Class:", N_c)
@@ -1718,7 +1802,10 @@ def main(args, transform_train, transform_test):
         np.savez(os.path.join(args.output_dir, 'remove_model_' + args.poison_type + '_' + str(args.dataset) + '_.npz'),
                  cl_loss=clean_losses, cl_test=clean_accs, po_loss=poison_losses, po_acc=poison_accs)
         model_save = args.poison_type + '_' + str(i) + '_' + str(args.dataset) + '.pth'
-        torch.save(net.state_dict(), os.path.join(args.output_dir, model_save))
+        if os.environ.get("SAVE_PURIFY_PTH", "0") == "1":
+            torch.save(net.state_dict(), os.path.join(args.output_dir, model_save))
+        else:
+            pass  # skip saving purification .pth checkpoints to save disk
         # scheduler.step()
 
         print('{} \t {:.4f} \t {:.4f}'.format((i + 1) * args.epoch_aggregation, 100 * ASR, 100 * ACC))
@@ -1756,6 +1843,15 @@ def main(args, transform_train, transform_test):
         "dataset": args.dataset,
         "arch": args.arch,
         "attack": args.poison_type,
+        "attack_variant": getattr(args, "attack_variant", "standard"),
+        "poison_rate": float(getattr(args, "poison_rate", -1)),
+        "val_ratio": float(getattr(args, "val_ratio", -1)),
+        "weather_effect": getattr(args, "weather_effect", ""),
+        "weather_intensity": float(getattr(args, "weather_intensity", getattr(args, "usd_weather_intensity", -1))),
+        "weather_intensity_range": getattr(args, "weather_intensity_range", ""),
+        "adaptive_attack": bool(getattr(args, "adaptive_attack", False)),
+        "initial_ASR_percent": float(100.0 * initial_ASR),
+        "initial_ACC_percent": float(100.0 * initial_ACC),
 
         "true_target_label": int(getattr(args, "true_target_label", args.target_label)),
         "defense_target_label": int(getattr(args, "defense_target_label", args.target_label)),
@@ -1841,67 +1937,25 @@ def FIP_Train(args, epoch, net, clean_val_loader, criterion, criterion_reg, opti
     net.train()
     total_steps = nb_iterations * len(clean_val_loader)
 
-    train_loss = 0
-    correct = 0
-    total = 0
-    desc = ('[%s][LR=%s] Loss: %.3f | Acc: %.3f%% (%d/%d)' %
-            ('Fisher', args.lr, 0, 0, correct, total))
-
-    prog_bar = tqdm(enumerate(clean_val_loader), total=len(clean_val_loader), desc=desc, leave=True)
-    for batch_idx, (inputs, targets) in prog_bar:
-        if timer_bank: timer_bank.start("T_opt")
-        g_step = epoch * len(clean_val_loader) + batch_idx
-        inputs, targets = inputs.cuda(), targets.cuda()
-        optimizer.zero_grad()
-        
-        outputs = net(inputs)
-        ce_loss = criterion(outputs, targets)
-        reg_loss = criterion_reg._compute_reg_loss(criterion_reg.weight)
-        total_loss = ce_loss + reg_loss
-        
-        progress = min(1.0, g_step / total_steps)
-        purify_phase = (progress < 0.30)
-        is_purification_batch = purify_phase and (batch_idx % criterion_reg.iter_gap == 0)
-        annealed_regF = args.reg_F * (1.0 - progress) ** 2
-
-        if is_purification_batch:
-            trace_loss = criterion_reg.get_trace_loss(outputs, targets)
-            total_loss += annealed_regF * trace_loss
-        else:
-            if args.use_usd and defense_criterion is not None and teacher_model is not None:
-                current_thresh = args.usd_thresh_start - (args.usd_thresh_start - args.usd_thresh_end) * progress
-                defense_criterion.confidence_thresh = current_thresh
-                usd_loss = defense_criterion(net, teacher_model, inputs, targets, g_step)
-                total_loss += usd_loss
-            
-            if args.use_fig_ad and kd_criterion is not None:
-                kd_loss = kd_criterion(outputs, inputs, targets)
-                total_loss += args.lambda_kd * kd_loss
-            
-            if (args.use_fig_ad or args.use_usd) and teacher_model is not None:
-                with torch.no_grad():
-                    m = args.ema_tau
-                    for param_t, param_s in zip(teacher_model.parameters(), net.parameters()):
-                        param_t.data.mul_(m).add_(param_s.data, alpha=1.0 - m)
-
-        total_loss.backward()
-
-        if is_purification_batch and guilty_mask:
-            grad_snapshot = {n: p.grad.detach().clone() for n, p in net.named_parameters() if p.grad is not None}
-            mask_non_guilty_grads_with_snapshot(net, guilty_mask, grad_snapshot, g_step)
-
-        optimizer.step()
-        if timer_bank: timer_bank.stop("T_opt")
-
-        train_loss += total_loss.item()
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
+    if not (args.use_usd or args.use_fig_ad):
+        # print("[FIP_Train] Pure FIP path: no USD/FiG-AD; SODA disabled.")
+        train_loss = 0; correct = 0; total = 0
         desc = ('[%s][LR=%s] Loss: %.3f | Acc: %.3f%% (%d/%d)' %
-                ('Fisher', args.lr, train_loss / (batch_idx + 1), 100. * correct / total, correct, total))
-        prog_bar.set_description(desc, refresh=True)
-
-    return train_loss / (batch_idx + 1), 100. * correct / total
+                ('Fisher', args.lr, 0, 0, correct, total))
+        prog_bar = tqdm(enumerate(clean_val_loader), total=len(clean_val_loader), desc=desc, leave=True)
+        for batch_idx, (inputs, targets) in prog_bar:
+            if timer_bank: timer_bank.start("T_opt")
+            inputs, targets = inputs.cuda(), targets.cuda()
+            loss, outputs = criterion_reg.forward_backward_update(inputs, targets, batch_idx)
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            if timer_bank: timer_bank.stop("T_opt")
+            desc = ('[%s][LR=%s] Loss: %.3f | Acc: %.3f%% (%d/%d)' %
+                    ('Fisher', args.lr, train_loss / (batch_idx + 1), 100. * correct / total, correct, total))
+            prog_bar.set_description(desc, refresh=True)
+        return train_loss / (batch_idx + 1), 100. * correct / total
     
     train_loss = 0
     correct = 0
@@ -2023,10 +2077,8 @@ if __name__ == '__main__':
     parser.add_argument('--widen-factor', type=int, default=1, help='widen_factor for WideResNet')
     parser.add_argument('--batch-size', type=int, default=128, help='the batch size for dataloader')
     parser.add_argument('--lr', type=float, default=0.005, help='the learning rate for mask optimization')
-    # parser.add_argument('--nb-epochs', type=int, default=2000, help='the number of iterations for training')
-    # parser.add_argument('--epoch-aggregation', type=int, default=500, help='print results every few iterations')
-    parser.add_argument('--nb-epochs', type=int, default=1000, help='the number of iterations for training')
-    parser.add_argument('--epoch-aggregation', type=int, default=250, help='print results every few iterations')
+    parser.add_argument('--nb-epochs', type=int, default=2000, help='the number of iterations for training')
+    parser.add_argument('--epoch-aggregation', type=int, default=500, help='print results every few iterations')
     parser.add_argument('--data-dir', type=str, default='../data', help='dir to the dataset')
     parser.add_argument('--val-ratio', type=float, default=0.1,
                         help='The fraction of the validate set')  ## Controls the validation size
@@ -2143,7 +2195,14 @@ if __name__ == '__main__':
         default=10,
         help='number of classes'
     )
-    parser.add_argument('--weather_effect', type=str, default='fog', choices=['fog', 'rain'])
+    parser.add_argument('--weather_effect', type=str, default='rain', choices=['rain', 'snow'],
+                        help='Weather trigger type. Default rain keeps old behavior; only explicit --weather_effect snow uses snow.')
+
+    parser.add_argument('--weather_intensity', type=float, default=0.3)
+
+    parser.add_argument('--weather_intensity_range', type=str, default='0.2,0.6')
+
+    parser.add_argument('--adaptive_attack', action='store_true')
     parser.add_argument('--num_workers', type=int, default=8)
 
     parser.add_argument('--time_purify', action='store_true', help='Measure full purification inference time.')
